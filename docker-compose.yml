@@ -1,0 +1,40 @@
+services:
+  orca:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    restart: unless-stopped
+
+    ports:
+      - "6768:6768"
+
+    volumes:
+      - orca-config:/root/.config/orca
+      - orca-electron-config:/root/.config/Orca
+      - opencode-config:/root/.config/opencode
+      - opencode-data:/root/.local/share/opencode
+
+      - orca-projects:/projects
+      - orca-workspaces:/root/orca/workspaces
+
+    environment:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      ELECTRON_NO_SANDBOX: "1"
+
+    command:
+      - /app/squashfs-root/AppRun
+      - serve
+      - --port
+      - "6768"
+      - --pairing-address
+      - ${ORCA_PAIRING_ADDRESS}
+      - --no-sandbox
+
+volumes:
+  orca-config:
+  orca-electron-config:
+  opencode-config:
+  opencode-data:
+  orca-projects:
+  orca-workspaces:
