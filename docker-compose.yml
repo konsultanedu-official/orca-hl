@@ -18,6 +18,12 @@ services:
       - orca-projects:/projects
       - orca-workspaces:/root/orca/workspaces
 
+      # Global agent skills
+      - orca-agent-skills:/root/.agents
+
+      # GitHub CLI credentials
+      - github-cli-config:/root/.config/gh
+
     environment:
       LIBGL_ALWAYS_SOFTWARE: "1"
       ELECTRON_NO_SANDBOX: "1"
@@ -38,3 +44,5 @@ volumes:
   opencode-data:
   orca-projects:
   orca-workspaces:
+  orca-agent-skills:
+  github-cli-config:
