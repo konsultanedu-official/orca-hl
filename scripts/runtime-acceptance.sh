@@ -23,6 +23,7 @@ Environment:
   DEPLOYMENT_MODE=proxy|host
   EXPECTED_VERSION=1.4.198       Optional exact runtime version assertion.
   REQUIRE_GH_AUTH=0|1            Fail when GitHub CLI is unauthenticated when set to 1.
+  HEALTH_TIMEOUT=120             Seconds to wait for Docker health to become healthy.
   LOG_LOOKBACK=15m               Docker log window scanned for fatal patterns.
 
 The script is read-only against a running deployment. It does not install skills,
@@ -38,9 +39,11 @@ ENV_FILE="${ENV_FILE:-.env}"
 DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-proxy}"
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
 REQUIRE_GH_AUTH="${REQUIRE_GH_AUTH:-0}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 LOG_LOOKBACK="${LOG_LOOKBACK:-15m}"
 
 [[ -f "$ENV_FILE" ]] || fail "env file not found: $ENV_FILE"
+[[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || fail "HEALTH_TIMEOUT must be an integer number of seconds"
 
 case "$DEPLOYMENT_MODE" in
   proxy) compose_files=(-f docker-compose.yml) ;;
@@ -62,7 +65,18 @@ health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}
 if [[ "$health" == "none" ]]; then
   warn "container has no health status"
 elif [[ "$health" != "healthy" ]]; then
-  fail "container health is $health"
+  info "waiting up to ${HEALTH_TIMEOUT}s for container health (current: $health)"
+  deadline=$((SECONDS + HEALTH_TIMEOUT))
+  while (( SECONDS < deadline )); do
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")"
+    [[ "$health" == "healthy" ]] && break
+    [[ "$health" == "unhealthy" ]] && fail "container became unhealthy"
+    running="$(docker inspect -f '{{.State.Running}}' "$cid")"
+    [[ "$running" == "true" ]] || fail "Orca container stopped while waiting for health"
+    sleep 2
+  done
+  [[ "$health" == "healthy" ]] || fail "container health did not become healthy within ${HEALTH_TIMEOUT}s (last: $health)"
+  info "health: healthy"
 else
   info "health: healthy"
 fi
