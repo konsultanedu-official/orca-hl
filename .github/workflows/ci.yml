@@ -32,6 +32,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
           bash scripts/preflight.sh --help >/dev/null
           bash scripts/runtime-acceptance.sh --help >/dev/null
           bash scripts/audit-legacy-mounts.sh --help >/dev/null
@@ -77,7 +78,22 @@ jobs:
             exit 1
           fi
 
-          # Replace the documentation placeholder with a reserved test-only host.
+          # Inline/exported environment values must be validated from the same
+          # effective Compose environment that will actually be used at runtime.
+          override_log="$(
+            ORCA_TAG=1.4.198 \
+            ORCA_PAIRING_ADDRESS=wss://orca-ci-override.invalid \
+            DOCKER_USE_SUDO=0 \
+            CHECK_IMAGE=0 \
+            DEPLOYMENT_MODE=proxy \
+            DEPLOYMENT_TIER=canary \
+            bash scripts/preflight.sh
+          )"
+          grep -F 'resolved image: ghcr.io/konsultanedu-official/orca-hl:1.4.198' <<<"$override_log"
+          grep -F 'pairing address: wss://orca-ci-override.invalid' <<<"$override_log"
+          grep -F 'PREFLIGHT_PASS' <<<"$override_log"
+
+          # Replace the documentation placeholder in the env file for the remaining tests.
           sed -i 's#wss://orca.example.com#wss://orca-ci.invalid#' .env
 
           # Default auto mode must work when the runner has direct Docker access.
