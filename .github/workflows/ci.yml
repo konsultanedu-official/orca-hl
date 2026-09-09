@@ -35,6 +35,7 @@ jobs:
           bash scripts/preflight.sh --help >/dev/null
           bash scripts/runtime-acceptance.sh --help >/dev/null
           bash scripts/audit-legacy-mounts.sh --help >/dev/null
+          bash scripts/migrate-legacy-state.sh --help >/dev/null
 
       - id: meta
         name: Resolve upstream release metadata
@@ -70,6 +71,15 @@ jobs:
           docker compose -f docker-compose.yml config >/dev/null
           docker compose -f docker-compose.yml -f docker-compose.host.yml config >/dev/null
 
+          # The shipped example endpoint must never pass an operational preflight.
+          if DOCKER_USE_SUDO=0 CHECK_IMAGE=0 DEPLOYMENT_MODE=proxy DEPLOYMENT_TIER=canary bash scripts/preflight.sh; then
+            echo "expected example.com pairing address to be rejected" >&2
+            exit 1
+          fi
+
+          # Replace the documentation placeholder with a reserved test-only host.
+          sed -i 's#wss://orca.example.com#wss://orca-ci.invalid#' .env
+
           # Default auto mode must work when the runner has direct Docker access.
           CHECK_IMAGE=0 DEPLOYMENT_MODE=proxy DEPLOYMENT_TIER=canary bash scripts/preflight.sh
           CHECK_IMAGE=0 DEPLOYMENT_MODE=host DEPLOYMENT_TIER=canary bash scripts/preflight.sh
@@ -80,6 +90,61 @@ jobs:
           # GitHub-hosted Linux runners provide passwordless sudo; exercise the
           # sudo-only code path used by locked-down Ubuntu/Coolify hosts.
           DOCKER_USE_SUDO=1 CHECK_IMAGE=0 DEPLOYMENT_MODE=proxy DEPLOYMENT_TIER=canary bash scripts/preflight.sh
+
+      - name: Test legacy named-volume migration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          prefix="orca-migration-${{ matrix.arch }}-${GITHUB_RUN_ID}"
+          src_container="${prefix}-src"
+          dst_container="${prefix}-dst"
+          src_config="${prefix}-src-config"
+          src_workspaces="${prefix}-src-workspaces"
+          dst_config="${prefix}-dst-config"
+          dst_workspaces="${prefix}-dst-workspaces"
+
+          cleanup() {
+            docker rm -f "$src_container" "$dst_container" >/dev/null 2>&1 || true
+            docker volume rm -f "$src_config" "$src_workspaces" "$dst_config" "$dst_workspaces" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          cleanup
+
+          docker volume create "$src_config" >/dev/null
+          docker volume create "$src_workspaces" >/dev/null
+          docker volume create "$dst_config" >/dev/null
+          docker volume create "$dst_workspaces" >/dev/null
+
+          docker create --name "$src_container" \
+            -v "$src_config:/root/.config/orca" \
+            -v "$src_workspaces:/root/orca/workspaces" \
+            alpine:3.20 sh -c 'sleep 3600' >/dev/null
+          docker start "$src_container" >/dev/null
+          docker exec "$src_container" sh -ec '
+            printf legacy-config > /root/.config/orca/state.txt
+            mkdir -p /root/orca/workspaces/repo-a
+            printf legacy-worktree > /root/orca/workspaces/repo-a/marker.txt
+          '
+          docker stop "$src_container" >/dev/null
+
+          docker create --name "$dst_container" \
+            -v "$dst_config:/home/orca/.config/orca" \
+            -v "$dst_workspaces:/home/orca/orca/workspaces" \
+            alpine:3.20 sh -c 'sleep 3600' >/dev/null
+
+          DOCKER_USE_SUDO=0 bash scripts/migrate-legacy-state.sh "$src_container" "$dst_container"
+          DOCKER_USE_SUDO=0 bash scripts/migrate-legacy-state.sh --execute "$src_container" "$dst_container"
+
+          docker run --rm -v "$dst_config:/data:ro" alpine:3.20 sh -ec '
+            test "$(cat /data/state.txt)" = legacy-config
+            test "$(stat -c %u /data/state.txt)" = 10001
+            test "$(stat -c %g /data/state.txt)" = 10001
+          '
+          docker run --rm -v "$dst_workspaces:/data:ro" alpine:3.20 sh -ec '
+            test "$(cat /data/repo-a/marker.txt)" = legacy-worktree
+            test "$(stat -c %u /data/repo-a/marker.txt)" = 10001
+            test "$(stat -c %g /data/repo-a/marker.txt)" = 10001
+          '
 
       - name: Build ${{ matrix.arch }} test image natively
         uses: docker/build-push-action@v6
