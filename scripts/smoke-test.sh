@@ -6,8 +6,20 @@ fail() {
   exit 1
 }
 
-for cmd in git node npm npx gh Xvfb jq python3; do
+for cmd in git node npm npx gh Xvfb jq python3 codex claude opencode; do
   command -v "$cmd" >/dev/null 2>&1 || fail "missing command: $cmd"
+done
+
+for dir in \
+  "$HOME/.codex" \
+  "$HOME/.claude" \
+  "$HOME/.agents" \
+  "$HOME/.config/gh" \
+  "$HOME/.config/opencode" \
+  "$HOME/.local/share/opencode" \
+  "$HOME/orca/workspaces"; do
+  [[ -d "$dir" ]] || fail "missing persistent-state directory: $dir"
+  [[ -w "$dir" ]] || fail "persistent-state directory is not writable: $dir"
 done
 
 app="/opt/orca/squashfs-root/AppRun"
@@ -17,10 +29,15 @@ node --version
 npm --version
 git --version
 gh --version
+codex --version
+claude --version
+opencode --version
 
-if command -v opencode >/dev/null 2>&1; then
-  opencode --version
-fi
+# Orca's Codex integration invokes `codex app-server`; verify that capability,
+# not only the top-level binary, so a missing/incompatible Codex install fails CI.
+codex app-server --help >/dev/null || fail "codex app-server capability unavailable"
+claude --help >/dev/null || fail "claude CLI capability unavailable"
+opencode --help >/dev/null || fail "opencode CLI capability unavailable"
 
 log="$(mktemp)"
 pid=""
