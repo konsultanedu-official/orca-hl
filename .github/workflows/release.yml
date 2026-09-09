@@ -1,6 +1,15 @@
 name: Sync Orca Release
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .dockerignore
+      - scripts/**
+      - .github/workflows/release.yml
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
@@ -58,10 +67,11 @@ jobs:
           current_version="$(tr -d '[:space:]' < VERSION)"
 
           should_build=true
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" && "$target_version" == "$current_version" ]]; then
+          if [[ "$target_version" == "$current_version" ]]; then
             should_build=false
-          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "$target_version" == "$current_version" && "${FORCE_REBUILD:-false}" != "true" ]]; then
-            should_build=false
+            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${FORCE_REBUILD:-false}" == "true" ]]; then
+              should_build=true
+            fi
           fi
 
           promote_latest=false
@@ -78,11 +88,12 @@ jobs:
             echo "promote_latest=$promote_latest"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Current wrapper VERSION : $current_version"
-          echo "Target upstream          : $target_tag"
-          echo "Latest stable upstream   : $latest_version"
-          echo "Build required           : $should_build"
-          echo "Promote latest           : $promote_latest"
+          echo "Event                    : $GITHUB_EVENT_NAME"
+          echo "Current wrapper VERSION  : $current_version"
+          echo "Target upstream           : $target_tag"
+          echo "Latest stable upstream    : $latest_version"
+          echo "Build required            : $should_build"
+          echo "Promote latest            : $promote_latest"
 
   build-test-push-arch:
     needs: resolve
