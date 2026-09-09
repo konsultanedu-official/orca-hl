@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - docker-compose.yml
+      - VERSION
+      - scripts/**
+      - .github/workflows/**
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      amd64_sha256: ${{ steps.meta.outputs.amd64_sha256 }}
+      arm64_sha256: ${{ steps.meta.outputs.arm64_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        name: Resolve upstream release metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          bash ./scripts/release-meta.sh "$version" >> "$GITHUB_OUTPUT"
+
+  test-image:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.arch }} test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: orca-hl:test-${{ matrix.arch }}
+          build-args: |
+            ORCA_VERSION=${{ needs.metadata.outputs.version }}
+            ORCA_SHA256_AMD64=${{ needs.metadata.outputs.amd64_sha256 }}
+            ORCA_SHA256_ARM64=${{ needs.metadata.outputs.arm64_sha256 }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=ci-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
+
+      - name: Run ${{ matrix.arch }} smoke test
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TEST_IMAGE: orca-hl:test-${{ matrix.arch }}
+        run: |
+          docker run --rm \
+            --platform "$PLATFORM" \
+            --shm-size=1g \
+            --entrypoint /usr/local/bin/smoke-test.sh \
+            "$TEST_IMAGE"
