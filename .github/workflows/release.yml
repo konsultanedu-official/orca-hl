@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   resolve:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
@@ -84,7 +84,7 @@ jobs:
           echo "Build required           : $should_build"
           echo "Promote latest           : $promote_latest"
 
-  test-image:
+  build-test-push-arch:
     needs: resolve
     if: needs.resolve.outputs.should_build == 'true'
     strategy:
@@ -93,17 +93,24 @@ jobs:
         include:
           - arch: amd64
             platform: linux/amd64
+            runner: ubuntu-24.04
           - arch: arm64
             platform: linux/arm64
-    runs-on: ubuntu-latest
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
-
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build ${{ matrix.arch }} candidate
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ${{ matrix.arch }} candidate natively
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -121,31 +128,35 @@ jobs:
           cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
 
       - name: Smoke test ${{ matrix.arch }} candidate
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          TEST_IMAGE: orca-hl:candidate-${{ matrix.arch }}
         run: |
           docker run --rm \
-            --platform "$PLATFORM" \
             --shm-size=1g \
             --entrypoint /usr/local/bin/smoke-test.sh \
-            "$TEST_IMAGE"
+            orca-hl:candidate-${{ matrix.arch }}
 
-  publish:
+      - name: Push the exact tested architecture image
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          target="$image:$VERSION-$ARCH"
+          docker tag "orca-hl:candidate-$ARCH" "$target"
+          docker push "$target"
+          echo "Published tested architecture image: $target"
+
+  publish-manifest:
     needs:
       - resolve
-      - test-image
+      - build-test-push-arch
     if: needs.resolve.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
-      image: ${{ steps.tags.outputs.image }}
-      tags: ${{ steps.tags.outputs.tags }}
-      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.publish.outputs.image }}
+      digest: ${{ steps.publish.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-qemu-action@v3
-
       - uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
@@ -155,15 +166,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: tags
-        name: Generate image tags
+      - id: publish
+        name: Publish tested multi-arch manifest and aliases
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
           PROMOTE_LATEST: ${{ needs.resolve.outputs.promote_latest }}
         shell: bash
         run: |
           set -Eeuo pipefail
+
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          amd64="$image:$VERSION-amd64"
+          arm64="$image:$VERSION-arm64"
           major="${VERSION%%.*}"
           minor="${VERSION%.*}"
 
@@ -180,36 +194,37 @@ jobs:
             )
           fi
 
+          create_args=()
+          for tag in "${tags[@]}"; do
+            create_args+=(--tag "$tag")
+          done
+
+          docker buildx imagetools create \
+            "${create_args[@]}" \
+            "$amd64" \
+            "$arm64"
+
+          docker buildx imagetools inspect "$image:$VERSION"
+
+          digest="$(docker buildx imagetools inspect "$image:$VERSION" | awk '/^Digest:/ {print $2; exit}')"
+          if [[ -z "$digest" ]]; then
+            digest="unknown"
+          fi
+
           {
             echo "image=$image"
-            echo "tags<<EOF"
-            printf '%s\n' "${tags[@]}"
-            echo "EOF"
+            echo "digest=$digest"
           } >> "$GITHUB_OUTPUT"
 
-      - id: build
-        name: Build and publish multi-arch image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
-            ORCA_VERSION=${{ needs.resolve.outputs.version }}
-            ORCA_SHA256_AMD64=${{ needs.resolve.outputs.amd64_sha256 }}
-            ORCA_SHA256_ARM64=${{ needs.resolve.outputs.arm64_sha256 }}
-            BUILD_DATE=${{ github.event.repository.updated_at }}
-            VCS_REF=${{ github.sha }}
-          cache-from: type=gha,scope=publish
-          cache-to: type=gha,mode=max,scope=publish
+          echo "Published multi-arch image: $image:$VERSION"
+          echo "Manifest digest: $digest"
 
   record-version:
     needs:
       - resolve
-      - publish
+      - publish-manifest
     if: needs.resolve.outputs.promote_latest == 'true' && needs.resolve.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -225,21 +240,20 @@ jobs:
 
           if git diff --quiet -- VERSION; then
             echo "VERSION already records $VERSION"
-            exit 0
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add VERSION
+            git commit -m "chore: sync Orca v$VERSION"
+            git push origin HEAD:main
           fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add VERSION
-          git commit -m "chore: sync Orca v$VERSION"
-          git push origin HEAD:main
 
       - name: Create wrapper GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
-          IMAGE: ${{ needs.publish.outputs.image }}
-          DIGEST: ${{ needs.publish.outputs.digest }}
+          IMAGE: ${{ needs.publish-manifest.outputs.image }}
+          DIGEST: ${{ needs.publish-manifest.outputs.digest }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -249,7 +263,7 @@ jobs:
             exit 0
           fi
 
-          notes="$(printf 'Unofficial Docker wrapper synchronized with stablyai/orca v%s.\n\nImages:\n- %s:%s\n- %s:latest\n\nPlatforms: linux/amd64, linux/arm64\nManifest digest: %s\n' "$VERSION" "$IMAGE" "$VERSION" "$IMAGE" "$DIGEST")"
+          notes="$(printf 'Unofficial Docker wrapper synchronized with stablyai/orca v%s.\n\nImages:\n- %s:%s\n- %s:latest\n- %s:%s-amd64\n- %s:%s-arm64\n\nPlatforms: linux/amd64, linux/arm64\nManifest digest: %s\n' "$VERSION" "$IMAGE" "$VERSION" "$IMAGE" "$IMAGE" "$VERSION" "$IMAGE" "$VERSION" "$DIGEST")"
           gh release create "v$VERSION" \
             --target main \
             --title "Orca Docker v$VERSION" \
