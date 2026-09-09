@@ -42,17 +42,17 @@ jobs:
         include:
           - arch: amd64
             platform: linux/amd64
+            runner: ubuntu-24.04
           - arch: arm64
             platform: linux/arm64
-    runs-on: ubuntu-latest
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
-
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build ${{ matrix.arch }} test image
+      - name: Build ${{ matrix.arch }} test image natively
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -71,11 +71,9 @@ jobs:
 
       - name: Run ${{ matrix.arch }} smoke test
         env:
-          PLATFORM: ${{ matrix.platform }}
           TEST_IMAGE: orca-hl:test-${{ matrix.arch }}
         run: |
           docker run --rm \
-            --platform "$PLATFORM" \
             --shm-size=1g \
             --entrypoint /usr/local/bin/smoke-test.sh \
             "$TEST_IMAGE"
