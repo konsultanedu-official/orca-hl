@@ -23,8 +23,10 @@ Environment:
   DEPLOYMENT_MODE=proxy|host     proxy = Coolify/Traefik; host = aaPanel/plain Docker.
   DEPLOYMENT_TIER=canary|production
   CHECK_IMAGE=1|0                Inspect the configured image manifest in its registry.
+  DOCKER_USE_SUDO=auto|0|1       auto = direct, then cached sudo; 1 = interactive sudo.
 
 The script is read-only. It does not pull, start, stop, mutate, or authenticate anything.
+Using DOCKER_USE_SUDO=1 may ask for the host user's sudo password.
 EOF
   exit 0
 fi
@@ -32,14 +34,17 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=scripts/lib/docker-access.sh
+source "$ROOT/scripts/lib/docker-access.sh"
+
 ENV_FILE="${ENV_FILE:-.env}"
 DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-proxy}"
 DEPLOYMENT_TIER="${DEPLOYMENT_TIER:-canary}"
 CHECK_IMAGE="${CHECK_IMAGE:-1}"
 
-command -v docker >/dev/null 2>&1 || fail "docker CLI is not installed"
-docker info >/dev/null 2>&1 || fail "Docker daemon is not reachable"
-docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
+orca_resolve_docker_access || fail "$ORCA_DOCKER_ACCESS_ERROR"
+"${DOCKER_CMD[@]}" compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable for Docker access mode: $ORCA_DOCKER_ACCESS_MODE"
+info "Docker access: $ORCA_DOCKER_ACCESS_MODE"
 
 [[ -f "$ENV_FILE" ]] || fail "env file not found: $ENV_FILE (copy .env.example first)"
 
@@ -60,7 +65,7 @@ case "$DEPLOYMENT_TIER" in
   *) fail "DEPLOYMENT_TIER must be canary or production" ;;
 esac
 
-compose=(docker compose --env-file "$ENV_FILE" "${compose_files[@]}")
+compose=("${DOCKER_CMD[@]}" compose --env-file "$ENV_FILE" "${compose_files[@]}")
 
 info "validating Compose model ($DEPLOYMENT_MODE)"
 "${compose[@]}" config >/dev/null || fail "Compose model is invalid"
@@ -93,9 +98,9 @@ if [[ "$DEPLOYMENT_MODE" == "host" ]]; then
 fi
 
 if [[ "$CHECK_IMAGE" == "1" ]]; then
-  docker buildx version >/dev/null 2>&1 || fail "docker buildx is required for registry manifest inspection"
+  "${DOCKER_CMD[@]}" buildx version >/dev/null 2>&1 || fail "docker buildx is required for registry manifest inspection"
   info "inspecting registry manifest for $image"
-  manifest="$(docker buildx imagetools inspect "$image" 2>&1)" || {
+  manifest="$("${DOCKER_CMD[@]}" buildx imagetools inspect "$image" 2>&1)" || {
     printf '%s\n' "$manifest" >&2
     fail "configured image manifest is not reachable"
   }
