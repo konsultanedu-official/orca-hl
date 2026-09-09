@@ -113,7 +113,7 @@ entry_count() {
 volume_size() {
   local volume="$1"
   "${DOCKER_CMD[@]}" run --rm -v "$volume:/data:ro" "$MIGRATION_HELPER_IMAGE" \
-    sh -ec "du -sh /data 2>/dev/null | awk '{print \\$1}'"
+    sh -ec 'du -sh /data 2>/dev/null | while read -r size rest; do printf "%s\n" "$size"; done'
 }
 
 legacy_paths=(
