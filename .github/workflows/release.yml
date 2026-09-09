@@ -1,0 +1,270 @@
+name: Sync Orca Release
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      orca_version:
+        description: "Orca version to build (for example 1.4.198). Leave empty for latest stable."
+        required: false
+        type: string
+      force_rebuild:
+        description: "Rebuild even if VERSION already matches"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: orca-upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      amd64_sha256: ${{ steps.resolve.outputs.amd64_sha256 }}
+      arm64_sha256: ${{ steps.resolve.outputs.arm64_sha256 }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+      promote_latest: ${{ steps.resolve.outputs.promote_latest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: resolve
+        name: Resolve target release
+        env:
+          REQUESTED_VERSION: ${{ inputs.orca_version }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          requested="${REQUESTED_VERSION:-latest}"
+          target_meta="$(bash ./scripts/release-meta.sh "$requested")"
+          latest_meta="$(bash ./scripts/release-meta.sh latest)"
+
+          target_version="$(awk -F= '$1=="version" {print $2}' <<<"$target_meta")"
+          target_tag="$(awk -F= '$1=="tag" {print $2}' <<<"$target_meta")"
+          target_prerelease="$(awk -F= '$1=="prerelease" {print $2}' <<<"$target_meta")"
+          amd64_sha256="$(awk -F= '$1=="amd64_sha256" {print $2}' <<<"$target_meta")"
+          arm64_sha256="$(awk -F= '$1=="arm64_sha256" {print $2}' <<<"$target_meta")"
+          latest_version="$(awk -F= '$1=="version" {print $2}' <<<"$latest_meta")"
+          current_version="$(tr -d '[:space:]' < VERSION)"
+
+          should_build=true
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" && "$target_version" == "$current_version" ]]; then
+            should_build=false
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "$target_version" == "$current_version" && "${FORCE_REBUILD:-false}" != "true" ]]; then
+            should_build=false
+          fi
+
+          promote_latest=false
+          if [[ "$target_version" == "$latest_version" && "$target_prerelease" == "false" ]]; then
+            promote_latest=true
+          fi
+
+          {
+            echo "version=$target_version"
+            echo "tag=$target_tag"
+            echo "amd64_sha256=$amd64_sha256"
+            echo "arm64_sha256=$arm64_sha256"
+            echo "should_build=$should_build"
+            echo "promote_latest=$promote_latest"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Current wrapper VERSION : $current_version"
+          echo "Target upstream          : $target_tag"
+          echo "Latest stable upstream   : $latest_version"
+          echo "Build required           : $should_build"
+          echo "Promote latest           : $promote_latest"
+
+  build-test-push-arch:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ${{ matrix.arch }} candidate natively
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: orca-hl:candidate-${{ matrix.arch }}
+          build-args: |
+            ORCA_VERSION=${{ needs.resolve.outputs.version }}
+            ORCA_SHA256_AMD64=${{ needs.resolve.outputs.amd64_sha256 }}
+            ORCA_SHA256_ARM64=${{ needs.resolve.outputs.arm64_sha256 }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+
+      - name: Smoke test ${{ matrix.arch }} candidate
+        run: |
+          docker run --rm \
+            --shm-size=1g \
+            --entrypoint /usr/local/bin/smoke-test.sh \
+            orca-hl:candidate-${{ matrix.arch }}
+
+      - name: Push the exact tested architecture image
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          target="$image:$VERSION-$ARCH"
+          docker tag "orca-hl:candidate-$ARCH" "$target"
+          docker push "$target"
+          echo "Published tested architecture image: $target"
+
+  publish-manifest:
+    needs:
+      - resolve
+      - build-test-push-arch
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: publish
+        name: Publish tested multi-arch manifest and aliases
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          PROMOTE_LATEST: ${{ needs.resolve.outputs.promote_latest }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          amd64="$image:$VERSION-amd64"
+          arm64="$image:$VERSION-arm64"
+          major="${VERSION%%.*}"
+          minor="${VERSION%.*}"
+
+          tags=(
+            "$image:$VERSION"
+            "$image:v$VERSION"
+          )
+
+          if [[ "$PROMOTE_LATEST" == "true" ]]; then
+            tags+=(
+              "$image:$minor"
+              "$image:$major"
+              "$image:latest"
+            )
+          fi
+
+          create_args=()
+          for tag in "${tags[@]}"; do
+            create_args+=(--tag "$tag")
+          done
+
+          docker buildx imagetools create \
+            "${create_args[@]}" \
+            "$amd64" \
+            "$arm64"
+
+          docker buildx imagetools inspect "$image:$VERSION"
+
+          digest="$(docker buildx imagetools inspect "$image:$VERSION" | awk '/^Digest:/ {print $2; exit}')"
+          if [[ -z "$digest" ]]; then
+            digest="unknown"
+          fi
+
+          {
+            echo "image=$image"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Published multi-arch image: $image:$VERSION"
+          echo "Manifest digest: $digest"
+
+  record-version:
+    needs:
+      - resolve
+      - publish-manifest
+    if: needs.resolve.outputs.promote_latest == 'true' && needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Record published stable version
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' "$VERSION" > VERSION
+
+          if git diff --quiet -- VERSION; then
+            echo "VERSION already records $VERSION"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add VERSION
+            git commit -m "chore: sync Orca v$VERSION"
+            git push origin HEAD:main
+          fi
+
+      - name: Create wrapper GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          IMAGE: ${{ needs.publish-manifest.outputs.image }}
+          DIGEST: ${{ needs.publish-manifest.outputs.digest }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "GitHub release v$VERSION already exists"
+            exit 0
+          fi
+
+          notes="$(printf 'Unofficial Docker wrapper synchronized with stablyai/orca v%s.\n\nImages:\n- %s:%s\n- %s:latest\n- %s:%s-amd64\n- %s:%s-arm64\n\nPlatforms: linux/amd64, linux/arm64\nManifest digest: %s\n' "$VERSION" "$IMAGE" "$VERSION" "$IMAGE" "$IMAGE" "$VERSION" "$IMAGE" "$VERSION" "$DIGEST")"
+          gh release create "v$VERSION" \
+            --target main \
+            --title "Orca Docker v$VERSION" \
+            --notes "$notes"
