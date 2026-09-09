@@ -20,6 +20,9 @@ Environment:
 Read-only audit for an older/root-based Orca deployment. The script never starts,
 stops, copies, chowns, deletes, or otherwise mutates the target container or data.
 Using DOCKER_USE_SUDO=1 may ask for the host user's sudo password.
+
+The audit prints only Orca-specific endpoint variables and routing-label hints; it
+does not dump the container's full environment or secrets.
 EOF
   [[ "${1:-}" == "--help" ]] && exit 0
   exit 2
@@ -43,6 +46,25 @@ info "container: $target"
 info "image: $image"
 info "configured user: $user"
 info "running: $running"
+
+echo
+echo '=== Orca endpoint hints (safe filtered env) ==='
+endpoint_env="$("${DOCKER_CMD[@]}" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$target" | grep -E '^(ORCA_PAIRING_ADDRESS|ORCA_PORT)=' || true)"
+if [[ -n "$endpoint_env" ]]; then
+  printf '%s\n' "$endpoint_env"
+else
+  echo '<none>'
+fi
+
+echo
+echo '=== Reverse-proxy routing hints (safe filtered labels) ==='
+routing_labels="$("${DOCKER_CMD[@]}" inspect -f '{{range $k, $v := .Config.Labels}}{{printf "%s=%s\n" $k $v}}{{end}}' "$target" \
+  | grep -Ei '(traefik\..*\.rule=|coolify.*(fqdn|domain|url)=|caddy.*(host|route)=)' || true)"
+if [[ -n "$routing_labels" ]]; then
+  printf '%s\n' "$routing_labels"
+else
+  echo '<none>'
+fi
 
 echo
 echo '=== Mounts ==='
