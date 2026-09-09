@@ -1,41 +1,32 @@
 services:
   orca:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: ${ORCA_IMAGE:-ghcr.io/konsultanedu-official/orca-hl}:${ORCA_TAG:-latest}
     restart: unless-stopped
 
-    ports:
-      - "6768:6768"
+    # Coolify/Traefik should route to this internal port. Avoid publishing 6768
+    # directly unless you explicitly need host-level access.
+    expose:
+      - "6768"
 
-    volumes:
-      - orca-config:/root/.config/orca
-      - orca-electron-config:/root/.config/Orca
-      - opencode-config:/root/.config/opencode
-      - opencode-data:/root/.local/share/opencode
-
-      - orca-projects:/projects
-      - orca-workspaces:/root/orca/workspaces
-
-      # Global agent skills
-      - orca-agent-skills:/root/.agents
-
-      # GitHub CLI credentials
-      - github-cli-config:/root/.config/gh
+    # Chromium/Electron is much more reliable with more than Docker's default
+    # 64 MiB /dev/shm.
+    shm_size: "1gb"
 
     environment:
+      ORCA_PORT: "6768"
+      ORCA_PAIRING_ADDRESS: ${ORCA_PAIRING_ADDRESS}
+      ORCA_JSON_READY: "1"
       LIBGL_ALWAYS_SOFTWARE: "1"
-      ELECTRON_NO_SANDBOX: "1"
 
-    command:
-      - /app/squashfs-root/AppRun
-      - serve
-      - --port
-      - "6768"
-      - --pairing-address
-      - ${ORCA_PAIRING_ADDRESS}
-      - --no-sandbox
+    volumes:
+      - orca-config:/home/orca/.config/orca
+      - orca-electron-config:/home/orca/.config/Orca
+      - opencode-config:/home/orca/.config/opencode
+      - opencode-data:/home/orca/.local/share/opencode
+      - orca-projects:/projects
+      - orca-workspaces:/home/orca/orca/workspaces
+      - orca-agent-skills:/home/orca/.agents
+      - github-cli-config:/home/orca/.config/gh
 
 volumes:
   orca-config:
