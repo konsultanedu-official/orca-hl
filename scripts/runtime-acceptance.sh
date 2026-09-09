@@ -25,15 +25,20 @@ Environment:
   REQUIRE_GH_AUTH=0|1            Fail when GitHub CLI is unauthenticated when set to 1.
   HEALTH_TIMEOUT=120             Seconds to wait for Docker health to become healthy.
   LOG_LOOKBACK=15m               Docker log window scanned for fatal patterns.
+  DOCKER_USE_SUDO=auto|0|1       auto = direct, then cached sudo; 1 = interactive sudo.
 
 The script is read-only against a running deployment. It does not install skills,
 authenticate accounts, mutate Git state, start agents, or change container state.
+Using DOCKER_USE_SUDO=1 may ask for the host user's sudo password.
 EOF
   exit 0
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+# shellcheck source=scripts/lib/docker-access.sh
+source "$ROOT/scripts/lib/docker-access.sh"
 
 ENV_FILE="${ENV_FILE:-.env}"
 DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-proxy}"
@@ -45,33 +50,37 @@ LOG_LOOKBACK="${LOG_LOOKBACK:-15m}"
 [[ -f "$ENV_FILE" ]] || fail "env file not found: $ENV_FILE"
 [[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || fail "HEALTH_TIMEOUT must be an integer number of seconds"
 
+orca_resolve_docker_access || fail "$ORCA_DOCKER_ACCESS_ERROR"
+"${DOCKER_CMD[@]}" compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable for Docker access mode: $ORCA_DOCKER_ACCESS_MODE"
+info "Docker access: $ORCA_DOCKER_ACCESS_MODE"
+
 case "$DEPLOYMENT_MODE" in
   proxy) compose_files=(-f docker-compose.yml) ;;
   host) compose_files=(-f docker-compose.yml -f docker-compose.host.yml) ;;
   *) fail "DEPLOYMENT_MODE must be proxy or host" ;;
 esac
 
-compose=(docker compose --env-file "$ENV_FILE" "${compose_files[@]}")
+compose=("${DOCKER_CMD[@]}" compose --env-file "$ENV_FILE" "${compose_files[@]}")
 "${compose[@]}" config >/dev/null || fail "Compose model is invalid"
 
 cid="$("${compose[@]}" ps -q orca)"
 [[ -n "$cid" ]] || fail "Orca service container was not found"
 
-running="$(docker inspect -f '{{.State.Running}}' "$cid")"
+running="$("${DOCKER_CMD[@]}" inspect -f '{{.State.Running}}' "$cid")"
 [[ "$running" == "true" ]] || fail "Orca container is not running"
 info "container: $cid"
 
-health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")"
+health="$("${DOCKER_CMD[@]}" inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")"
 if [[ "$health" == "none" ]]; then
   warn "container has no health status"
 elif [[ "$health" != "healthy" ]]; then
   info "waiting up to ${HEALTH_TIMEOUT}s for container health (current: $health)"
   deadline=$((SECONDS + HEALTH_TIMEOUT))
   while (( SECONDS < deadline )); do
-    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")"
+    health="$("${DOCKER_CMD[@]}" inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")"
     [[ "$health" == "healthy" ]] && break
     [[ "$health" == "unhealthy" ]] && fail "container became unhealthy"
-    running="$(docker inspect -f '{{.State.Running}}' "$cid")"
+    running="$("${DOCKER_CMD[@]}" inspect -f '{{.State.Running}}' "$cid")"
     [[ "$running" == "true" ]] || fail "Orca container stopped while waiting for health"
     sleep 2
   done
@@ -116,7 +125,7 @@ for dir in \
   "${compose[@]}" exec -T orca sh -lc "test -d '$dir' && test -w '$dir'" || fail "persistent path missing or not writable: $dir"
 done
 
-root_mounts="$(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$cid" | awk '/^\/root(\/|$)/')"
+root_mounts="$("${DOCKER_CMD[@]}" inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$cid" | awk '/^\/root(\/|$)/')"
 if [[ -n "$root_mounts" ]]; then
   printf '%s\n' "$root_mounts" >&2
   fail "legacy /root mount destinations are still attached to the non-root image"
@@ -138,7 +147,7 @@ else
   fi
 fi
 
-logs="$(docker logs --since "$LOG_LOOKBACK" "$cid" 2>&1 || true)"
+logs="$("${DOCKER_CMD[@]}" logs --since "$LOG_LOOKBACK" "$cid" 2>&1 || true)"
 for pattern in \
   'spawn codex ENOENT' \
   'Exec format error' \

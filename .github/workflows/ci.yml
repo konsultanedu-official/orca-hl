@@ -31,9 +31,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          for script in scripts/*.sh; do
-            bash -n "$script"
-          done
+          find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
           bash scripts/preflight.sh --help >/dev/null
           bash scripts/runtime-acceptance.sh --help >/dev/null
           bash scripts/audit-legacy-mounts.sh --help >/dev/null
@@ -71,8 +69,17 @@ jobs:
           cp .env.example .env
           docker compose -f docker-compose.yml config >/dev/null
           docker compose -f docker-compose.yml -f docker-compose.host.yml config >/dev/null
+
+          # Default auto mode must work when the runner has direct Docker access.
           CHECK_IMAGE=0 DEPLOYMENT_MODE=proxy DEPLOYMENT_TIER=canary bash scripts/preflight.sh
           CHECK_IMAGE=0 DEPLOYMENT_MODE=host DEPLOYMENT_TIER=canary bash scripts/preflight.sh
+
+          # Explicit direct mode verifies the no-sudo path.
+          DOCKER_USE_SUDO=0 CHECK_IMAGE=0 DEPLOYMENT_MODE=proxy DEPLOYMENT_TIER=canary bash scripts/preflight.sh
+
+          # GitHub-hosted Linux runners provide passwordless sudo; exercise the
+          # sudo-only code path used by locked-down Ubuntu/Coolify hosts.
+          DOCKER_USE_SUDO=1 CHECK_IMAGE=0 DEPLOYMENT_MODE=proxy DEPLOYMENT_TIER=canary bash scripts/preflight.sh
 
       - name: Build ${{ matrix.arch }} test image natively
         uses: docker/build-push-action@v6
