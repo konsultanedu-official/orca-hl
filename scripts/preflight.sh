@@ -26,6 +26,10 @@ Environment:
   DOCKER_USE_SUDO=auto|0|1       auto = direct, then cached sudo; 1 = interactive sudo.
   ALLOW_EXAMPLE_PAIRING=0|1      Default: 0. Test-only escape hatch for example.com.
 
+Compose interpolation follows normal Docker Compose precedence. Values supplied as
+exported/inline environment variables therefore override the env file for this run.
+Bare shell assignments on separate lines are not exported and do not edit .env.
+
 The script is read-only. It does not pull, start, stop, mutate, or authenticate anything.
 Using DOCKER_USE_SUDO=1 may ask for the host user's sudo password.
 EOF
@@ -77,6 +81,16 @@ compose=("${DOCKER_CMD[@]}" compose --env-file "$ENV_FILE" "${compose_files[@]}"
 info "validating Compose model ($DEPLOYMENT_MODE)"
 "${compose[@]}" config >/dev/null || fail "Compose model is invalid"
 
+# Resolve the interpolation environment using Docker Compose itself so preflight
+# validates the same values that Compose will actually use. This avoids a split
+# source of truth between .env and exported/inline overrides.
+compose_environment="$("${compose[@]}" config --environment)" || fail "could not resolve effective Compose environment"
+
+effective_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' <<<"$compose_environment"
+}
+
 image="$("${compose[@]}" config --images | awk 'NF {print; exit}')"
 [[ -n "$image" ]] || fail "could not resolve Orca image from Compose"
 info "resolved image: $image"
@@ -93,8 +107,8 @@ if [[ "$DEPLOYMENT_TIER" == "canary" ]]; then
   fi
 fi
 
-pairing="$(awk -F= '/^[[:space:]]*ORCA_PAIRING_ADDRESS=/{sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
-[[ -n "$pairing" ]] || fail "ORCA_PAIRING_ADDRESS is empty or missing in $ENV_FILE"
+pairing="$(effective_value ORCA_PAIRING_ADDRESS)"
+[[ -n "$pairing" ]] || fail "ORCA_PAIRING_ADDRESS is empty or missing from the effective Compose environment"
 case "$pairing" in
   ws://*|wss://*) ;;
   *) warn "ORCA_PAIRING_ADDRESS does not start with ws:// or wss://: $pairing" ;;
@@ -105,7 +119,7 @@ if [[ "$ALLOW_EXAMPLE_PAIRING" != "1" && "$pairing" =~ ^wss?://([^/:]+\.)?exampl
 fi
 
 if [[ "$DEPLOYMENT_MODE" == "host" ]]; then
-  bind="$(awk -F= '/^[[:space:]]*ORCA_BIND_ADDRESS=/{sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
+  bind="$(effective_value ORCA_BIND_ADDRESS)"
   bind="${bind:-127.0.0.1}"
   if [[ "$bind" == "0.0.0.0" || "$bind" == "::" ]]; then
     warn "host publishing is bound publicly ($bind); prefer 127.0.0.1 behind aaPanel/Nginx unless public binding is intentional"

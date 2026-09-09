@@ -26,11 +26,31 @@ Copied target state is normalized to UID/GID `10001:10001` for the `orca` user.
 Before `--execute`, take a host/platform-native backup or snapshot of valuable
 source state. The repository does not create or manage backups.
 
+## Important shell conventions used in this runbook
+
+Text such as `LEGACY_CONTAINER_NAME` or `NEW_CANARY_CONTAINER_NAME` is descriptive
+placeholder text. Replace it with the actual value before running the command.
+
+Do **not** type angle-bracket placeholders such as `<new-canary-container>` into a
+shell command. In Bash, `<` and `>` are redirection operators and can cause syntax
+errors before the migration script is even invoked.
+
+Likewise, typing this on separate shell lines:
+
+```bash
+ORCA_TAG=1.4.198
+ORCA_PAIRING_ADDRESS=wss://canary.your-domain.tld
+```
+
+does not edit `.env`, and unexported shell variables are not inherited by child
+processes. For persistent deployment configuration, edit `.env`. For a one-shot
+preflight override, put the variables inline in front of the command.
+
 ## 1. Audit the legacy container
 
 ```bash
 DOCKER_USE_SUDO=1 \
-bash scripts/audit-legacy-mounts.sh <legacy-container>
+bash scripts/audit-legacy-mounts.sh LEGACY_CONTAINER_NAME
 ```
 
 The audit reports:
@@ -53,10 +73,36 @@ acceptance rather than a moving tag:
 ```env
 ORCA_IMAGE=ghcr.io/konsultanedu-official/orca-hl
 ORCA_TAG=1.4.198
-ORCA_PAIRING_ADDRESS=wss://<real-canary-endpoint>
+ORCA_PAIRING_ADDRESS=wss://canary.your-domain.tld
 ```
 
-Then run preflight:
+Edit the existing `.env` file rather than assigning unexported shell variables.
+For example:
+
+```bash
+cp .env .env.before-canary
+sed -i 's#^ORCA_IMAGE=.*#ORCA_IMAGE=ghcr.io/konsultanedu-official/orca-hl#' .env
+sed -i 's#^ORCA_TAG=.*#ORCA_TAG=1.4.198#' .env
+sed -i 's#^ORCA_PAIRING_ADDRESS=.*#ORCA_PAIRING_ADDRESS=wss://canary.your-domain.tld#' .env
+```
+
+Replace `wss://canary.your-domain.tld` with the real canary endpoint before
+running preflight.
+
+Alternatively, for a read-only one-shot preflight without modifying `.env`, pass
+exported values inline. Preflight resolves the same effective Compose environment
+that Docker Compose will use:
+
+```bash
+ORCA_TAG=1.4.198 \
+ORCA_PAIRING_ADDRESS=wss://canary.your-domain.tld \
+DOCKER_USE_SUDO=1 \
+DEPLOYMENT_MODE=proxy \
+DEPLOYMENT_TIER=canary \
+bash scripts/preflight.sh
+```
+
+Then run preflight against the persisted `.env` before deployment:
 
 ```bash
 DOCKER_USE_SUDO=1 \
@@ -86,15 +132,25 @@ The target must be a separate container from the legacy source.
 
 ## 4. Dry-run the migration
 
-The source may still be running for the dry-run because no data is copied:
+First obtain the real target name:
 
 ```bash
-DOCKER_USE_SUDO=1 \
-bash scripts/migrate-legacy-state.sh \
-  <legacy-container> \
-  <new-canary-container>
+sudo docker ps -a --format '{{.Names}}\t{{.Image}}' | grep -i orca
 ```
 
+Then run the migration using literal container names. Example shape:
+
+```bash
+SOURCE_CONTAINER='orca-old-123456'
+TARGET_CONTAINER='orca-canary-654321'
+
+DOCKER_USE_SUDO=1 \
+bash scripts/migrate-legacy-state.sh \
+  "$SOURCE_CONTAINER" \
+  "$TARGET_CONTAINER"
+```
+
+The source may still be running for the dry-run because no data is copied.
 Expected result ends with:
 
 ```text
@@ -126,8 +182,8 @@ does not stop them for you.
 ```bash
 DOCKER_USE_SUDO=1 \
 bash scripts/migrate-legacy-state.sh --execute \
-  <legacy-container> \
-  <new-canary-container>
+  "$SOURCE_CONTAINER" \
+  "$TARGET_CONTAINER"
 ```
 
 The tool:
