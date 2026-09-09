@@ -10,22 +10,27 @@ ARG ORCA_SHA256_ARM64=""
 ARG TARGETARCH
 ARG BUILD_DATE=""
 ARG VCS_REF=""
-ARG INSTALL_OPENCODE="true"
+ARG CODEX_VERSION="0.153.4"
+ARG CLAUDE_CODE_VERSION="2.1.236"
+ARG OPENCODE_VERSION="1.18.14"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/orca \
     LIBGL_ALWAYS_SOFTWARE=1 \
     ORCA_IMAGE_VERSION="${ORCA_VERSION}" \
-    PATH=/home/orca/.opencode/bin:/home/orca/.local/bin:/opt/orca/squashfs-root/resources/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/home/orca/.local/bin:/opt/orca/squashfs-root/resources/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 LABEL org.opencontainers.image.title="Orca Headless Docker" \
-      org.opencontainers.image.description="Unofficial headless Docker distribution for StablyAI Orca" \
+      org.opencontainers.image.description="Unofficial universal headless Docker distribution for StablyAI Orca" \
       org.opencontainers.image.source="https://github.com/konsultanedu-official/orca-hl" \
       org.opencontainers.image.version="${ORCA_VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       io.orca.upstream.repository="https://github.com/stablyai/orca" \
-      io.orca.upstream.version="v${ORCA_VERSION}"
+      io.orca.upstream.version="v${ORCA_VERSION}" \
+      io.orca.agent.codex.version="${CODEX_VERSION}" \
+      io.orca.agent.claude-code.version="${CLAUDE_CODE_VERSION}" \
+      io.orca.agent.opencode.version="${OPENCODE_VERSION}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -69,7 +74,6 @@ RUN apt-get update \
       libxss1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 + npm/npx for agent tooling, Skills and Node-based MCP servers.
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -77,7 +81,19 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && node --version \
     && npm --version
 
-# GitHub CLI is kept because Orca's native GitHub PR/checks/issues features use gh.
+# First-class Orca terminal agents. Binary versions are pinned in the image;
+# account credentials remain runtime-only under the service user's HOME.
+RUN npm install -g --omit=dev --no-audit --no-fund \
+      "@openai/codex@${CODEX_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "opencode-ai@${OPENCODE_VERSION}" \
+    && codex --version \
+    && codex app-server --help >/dev/null \
+    && claude --version \
+    && opencode --version
+
+# GitHub CLI is available for Orca's GitHub integration. Authentication is
+# deliberately supplied at runtime via gh auth login or an environment secret.
 RUN mkdir -p -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -120,19 +136,9 @@ RUN useradd --create-home --shell /bin/bash --uid 10001 orca \
       /home/orca/.config/gh \
       /home/orca/.local/share/opencode \
       /home/orca/.agents \
+      /home/orca/.codex \
+      /home/orca/.claude \
     && chown -R orca:orca /projects /home/orca
-
-USER orca
-
-# Keep OpenCode as the preinstalled default agent for parity with the current deployment.
-# It can be disabled at build time with --build-arg INSTALL_OPENCODE=false.
-RUN if [ "${INSTALL_OPENCODE}" = "true" ]; then \
-      curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh \
-      && SHELL=/bin/bash bash /tmp/install-opencode.sh --no-modify-path \
-      && test -x /home/orca/.opencode/bin/opencode \
-      && /home/orca/.opencode/bin/opencode --version \
-      && rm /tmp/install-opencode.sh; \
-    fi
 
 USER root
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
