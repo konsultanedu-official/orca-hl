@@ -24,6 +24,7 @@ Environment:
   DEPLOYMENT_TIER=canary|production
   CHECK_IMAGE=1|0                Inspect the configured image manifest in its registry.
   DOCKER_USE_SUDO=auto|0|1       auto = direct, then cached sudo; 1 = interactive sudo.
+  ALLOW_EXAMPLE_PAIRING=0|1      Default: 0. Test-only escape hatch for example.com.
 
 The script is read-only. It does not pull, start, stop, mutate, or authenticate anything.
 Using DOCKER_USE_SUDO=1 may ask for the host user's sudo password.
@@ -41,6 +42,12 @@ ENV_FILE="${ENV_FILE:-.env}"
 DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-proxy}"
 DEPLOYMENT_TIER="${DEPLOYMENT_TIER:-canary}"
 CHECK_IMAGE="${CHECK_IMAGE:-1}"
+ALLOW_EXAMPLE_PAIRING="${ALLOW_EXAMPLE_PAIRING:-0}"
+
+case "$ALLOW_EXAMPLE_PAIRING" in
+  0|1) ;;
+  *) fail "ALLOW_EXAMPLE_PAIRING must be 0 or 1" ;;
+esac
 
 orca_resolve_docker_access || fail "$ORCA_DOCKER_ACCESS_ERROR"
 "${DOCKER_CMD[@]}" compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable for Docker access mode: $ORCA_DOCKER_ACCESS_MODE"
@@ -78,8 +85,12 @@ if [[ "$DEPLOYMENT_TIER" == "production" && "$image" == *":latest" ]]; then
   fail "production must use an exact tested tag, not :latest"
 fi
 
-if [[ "$DEPLOYMENT_TIER" == "canary" && "$image" != *":latest" ]]; then
-  warn "canary is pinned to $image; this is valid but will not follow promoted upstream releases automatically"
+if [[ "$DEPLOYMENT_TIER" == "canary" ]]; then
+  if [[ "$image" == *":latest" ]]; then
+    warn "canary uses moving tag $image; prefer an exact tag for the first migration/reproducibility test"
+  else
+    info "canary image is pinned for reproducibility: $image"
+  fi
 fi
 
 pairing="$(awk -F= '/^[[:space:]]*ORCA_PAIRING_ADDRESS=/{sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
@@ -88,6 +99,10 @@ case "$pairing" in
   ws://*|wss://*) ;;
   *) warn "ORCA_PAIRING_ADDRESS does not start with ws:// or wss://: $pairing" ;;
 esac
+
+if [[ "$ALLOW_EXAMPLE_PAIRING" != "1" && "$pairing" =~ ^wss?://([^/:]+\.)?example\.com([/:]|$) ]]; then
+  fail "ORCA_PAIRING_ADDRESS still uses example.com placeholder: $pairing"
+fi
 
 if [[ "$DEPLOYMENT_MODE" == "host" ]]; then
   bind="$(awk -F= '/^[[:space:]]*ORCA_BIND_ADDRESS=/{sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
