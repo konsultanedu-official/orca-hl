@@ -36,6 +36,7 @@ RUN apt-get update \
       git \
       jq \
       openssh-client \
+      passwd \
       procps \
       python3 \
       python3-venv \
