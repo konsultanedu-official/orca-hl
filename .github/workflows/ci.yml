@@ -40,6 +40,8 @@ jobs:
 
       - id: meta
         name: Resolve upstream release metadata
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -Eeuo pipefail

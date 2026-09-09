@@ -50,13 +50,18 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.orca_version }}
           FORCE_REBUILD: ${{ inputs.force_rebuild }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
           requested="${REQUESTED_VERSION:-latest}"
           target_meta="$(bash ./scripts/release-meta.sh "$requested")"
-          latest_meta="$(bash ./scripts/release-meta.sh latest)"
+          if [[ "$requested" == "latest" ]]; then
+            latest_meta="$target_meta"
+          else
+            latest_meta="$(bash ./scripts/release-meta.sh latest)"
+          fi
 
           target_version="$(awk -F= '$1=="version" {print $2}' <<<"$target_meta")"
           target_tag="$(awk -F= '$1=="tag" {print $2}' <<<"$target_meta")"
