@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/orca \
     LIBGL_ALWAYS_SOFTWARE=1 \
     ORCA_IMAGE_VERSION="${ORCA_VERSION}" \
-    PATH=/home/orca/.opencode/bin:/home/orca/.local/bin:/opt/orca/squashfs-root/resources/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/home/orca/.opencode/bin:/home/orca/.local/bin:/opt/orca/squashfs-root/resources/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 LABEL org.opencontainers.image.title="Orca Headless Docker" \
       org.opencontainers.image.description="Unofficial headless Docker distribution for StablyAI Orca" \
