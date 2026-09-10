@@ -39,6 +39,30 @@ codex app-server --help >/dev/null || fail "codex app-server capability unavaila
 claude --help >/dev/null || fail "claude CLI capability unavailable"
 opencode --help >/dev/null || fail "opencode CLI capability unavailable"
 
+# Validate the optional portable OpenCode -> 9Router bootstrap without making a
+# network request or persisting test state into the image user's real HOME.
+bootstrap_home="$(mktemp -d)"
+HOME="$bootstrap_home" \
+NINEROUTER_BASE_URL="https://router.example.test/v1" \
+NINEROUTER_API_KEY="smoke-test-only" \
+  /usr/local/bin/docker-entrypoint.sh true
+
+bootstrap_cfg="$bootstrap_home/.config/opencode/opencode.json"
+[[ -f "$bootstrap_cfg" ]] || fail "9Router bootstrap did not create opencode.json"
+jq -e \
+  '.model == "9router/high-model" and
+   .small_model == "9router/low-model" and
+   .provider["9router"].options.baseURL == "{env:NINEROUTER_BASE_URL}" and
+   .provider["9router"].options.apiKey == "{env:NINEROUTER_API_KEY}" and
+   .provider["9router"].models["high-model"] and
+   .provider["9router"].models["low-model"] and
+   .provider["9router"].models["free-model"]' \
+  "$bootstrap_cfg" >/dev/null || fail "invalid 9Router bootstrap config"
+
+grep -Fq 'smoke-test-only' "$bootstrap_cfg" \
+  && fail "9Router API key value was written into opencode.json"
+rm -rf "$bootstrap_home"
+
 log="$(mktemp)"
 pid=""
 cleanup() {
