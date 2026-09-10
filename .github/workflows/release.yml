@@ -74,6 +74,14 @@ jobs:
           should_build=true
           if [[ "$target_version" == "$current_version" ]]; then
             should_build=false
+
+            # A push to one of the wrapper/runtime paths means the wrapper image
+            # changed even when the upstream Orca version did not. Rebuild the
+            # same exact version so GHCR actually contains the new wrapper.
+            if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+              should_build=true
+            fi
+
             if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${FORCE_REBUILD:-false}" == "true" ]]; then
               should_build=true
             fi

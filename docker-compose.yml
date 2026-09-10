@@ -17,6 +17,11 @@ services:
       ORCA_PAIRING_ADDRESS: ${ORCA_PAIRING_ADDRESS}
       ORCA_JSON_READY: "1"
       LIBGL_ALWAYS_SOFTWARE: "1"
+      # Optional portable OpenCode -> self-hosted 9Router configuration.
+      # The entrypoint bootstraps opencode.json only on a fresh config volume
+      # and never overwrites an existing operator-managed file.
+      NINEROUTER_BASE_URL: ${NINEROUTER_BASE_URL:-}
+      NINEROUTER_API_KEY: ${NINEROUTER_API_KEY:-}
 
     volumes:
       - orca-config:/home/orca/.config/orca
